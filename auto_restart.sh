@@ -32,6 +32,7 @@ export PATH="$FAKEBIN:$PATH"
 SCRIPT="$RL_DIR/run_rl_swarm.sh"
 TMP_LOG="/tmp/rlswarm_stdout.log"
 MAX_IDLE=600  # 10 минут
+RESTART_COUNT=0
 
 KEYWORDS=(
   "BlockingIOError"
@@ -48,11 +49,15 @@ KEYWORDS=(
 
 P2P_ERROR_MSG="P2PDaemonError('Daemon failed to start in 15.0 seconds')"
 
+echo "[$(date)] 🏁 Начинаем автоматический перезапуск rl-swarm..."
+echo "[$(date)] 💡 Пакеты будут установлены только при первом запуске в виртуальное окружение"
+
 while true; do
-  echo "[$(date)] 🚀 Запускаем Gensyn-ноду (rm подменён)..."
+  RESTART_COUNT=$((RESTART_COUNT + 1))
+  echo "[$(date)] 🚀 Запуск #$RESTART_COUNT Gensyn-ноды (в виртуальном окружении)..."
 
   rm -f "$TMP_LOG"
-  # Теперь внутри run_rl_swarm.sh все rm идут на нашу обёртку
+  # Теперь внутри run_rl_swarm.sh все команды выполняются в активированном .venv
   ( sleep 1 && printf "n\n\n\n" ) | bash "$SCRIPT" 2>&1 | tee "$TMP_LOG" &
   PID=$!
 
