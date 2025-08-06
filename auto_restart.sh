@@ -31,7 +31,7 @@ export PATH="$FAKEBIN:$PATH"
 
 SCRIPT="$RL_DIR/run_rl_swarm.sh"
 TMP_LOG="/tmp/rlswarm_stdout.log"
-MAX_IDLE=600  # 10 минут
+MAX_IDLE=1500  # 10 минут
 RESTART_COUNT=0
 
 KEYWORDS=(
@@ -48,6 +48,48 @@ KEYWORDS=(
 )
 
 P2P_ERROR_MSG="P2PDaemonError('Daemon failed to start in 15.0 seconds')"
+
+# Функция безопасной очистки процессов
+safe_cleanup() {
+    echo "[$(date)] 🧹 Выполняем безопасную очистку процессов..."
+    
+    # Получаем PID текущего скрипта и его родителя
+    CURRENT_PID=$$
+    PARENT_PID=$(ps -o ppid= -p $$ | xargs)
+    
+    echo "[$(date)] 📝 Защищаем процессы: $CURRENT_PID (текущий), $PARENT_PID (родитель)"
+    
+    # Убиваем hivemind процессы, исключая текущий скрипт
+    ps aux | grep hivemind | grep -v grep | while read user pid rest; do
+        if [[ "$pid" != "$CURRENT_PID" && "$pid" != "$PARENT_PID" ]]; then
+            echo "[$(date)] 🔪 Убиваем hivemind процесс: $pid"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    
+    # Убиваем python swarm процессы, исключая текущий скрипт и его родителя
+    ps aux | grep "python.*swarm" | grep -v grep | while read user pid rest; do
+        if [[ "$pid" != "$CURRENT_PID" && "$pid" != "$PARENT_PID" ]]; then
+            # Дополнительная проверка - не наш ли это скрипт?
+            if ! ps -p "$pid" -o cmd --no-headers | grep -q "$(basename $0)"; then
+                echo "[$(date)] 🔪 Убиваем python swarm процесс: $pid"
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
+    done
+    
+    # Убиваем процессы по имени файла (более безопасно)
+    pkill -f "run_rl_swarm.sh" 2>/dev/null || true
+    pkill -f "swarm_launcher.py" 2>/dev/null || true
+    pkill -f "rgym_exp" 2>/dev/null || true
+    
+    # Очищаем временные файлы
+    rm -f /tmp/hivemind_* 2>/dev/null || true
+    rm -f /tmp/dht_* 2>/dev/null || true
+    
+    echo "[$(date)] ✅ Очистка завершена, ждем 3 секунд..."
+    sleep 3
+}
 
 echo "[$(date)] 🏁 Начинаем автоматический перезапуск rl-swarm..."
 echo "[$(date)] 💡 Пакеты будут установлены только при первом запуске в виртуальное окружение"
@@ -71,7 +113,9 @@ while true; do
       if (( now - current_mod > MAX_IDLE )); then
         echo "[$(date)] ⚠️ Лог не обновлялся более $((MAX_IDLE/60)) мин. Перезапуск..."
         kill -9 "$PID" 2>/dev/null
-        sleep 3
+        
+        # Выполняем безопасную очистку при зависании
+        safe_cleanup
         break
       fi
     fi
@@ -89,7 +133,9 @@ while true; do
       fi
 
       kill -9 "$PID" 2>/dev/null
-      sleep 3
+      
+      # Выполняем безопасную очистку после P2P ошибки
+      safe_cleanup
       break
     fi
 
@@ -98,7 +144,9 @@ while true; do
       if grep -q "$ERR" "$TMP_LOG"; then
         echo "[$(date)] ❌ Найдена ошибка '$ERR'. Перезапуск..."
         kill -9 "$PID" 2>/dev/null
-        sleep 3
+        
+        # Выполняем безопасную очистку после ошибки
+        safe_cleanup
         break 2
       fi
     done
