@@ -1,9 +1,9 @@
+import json
 import logging
 import os
 import sys
 import time
 from collections import defaultdict
-from pathlib import Path
 
 from genrl.blockchain import SwarmCoordinator
 from genrl.communication import Communication
@@ -77,24 +77,6 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         file_handler.setFormatter(formatter)
         _LOG = get_logger()
         _LOG.addHandler(file_handler)
-
-        # Debug Logger Setup - для подробных signal_by_agent логов
-        self.debug_logger = logging.getLogger(f"debug_{self.animal_name}")
-        self.debug_logger.setLevel(logging.INFO)
-        debug_formatter = logging.Formatter(format_msg)
-        
-        # Очищаем лог-файл с сигналами перед началом работы
-        debug_log_path = os.path.join(log_dir, f"debug_signals_{self.animal_name}.log")
-        if os.path.exists(debug_log_path):
-            with open(debug_log_path, 'w') as f:
-                f.write("")  # Очищаем файл
-            get_logger().info(f"🧹 Cleared debug signals log file: {debug_log_path}")
-        
-        debug_file_handler = logging.FileHandler(debug_log_path)
-        debug_file_handler.setFormatter(debug_formatter)
-        self.debug_logger.addHandler(debug_file_handler)
-        # Не передаем логи в root logger
-        self.debug_logger.propagate = False
 
         # Сохраняем coordinator для работы с блокчейном
         self.coordinator = coordinator
@@ -182,6 +164,10 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         self.time_since_submit = time.time() #seconds
         self.submit_period = 3.0 #hours
         self.submitted_this_round = False
+        
+        # Файл для backup состояния наград
+        self.rewards_backup_file = os.path.join(log_dir, f"rewards_backup_{self.animal_name}.json")
+        self._load_rewards_backup()
 
     def _get_total_rewards_by_agent(self):
         rewards_by_agent = defaultdict(int)
@@ -195,6 +181,51 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
                     rewards_by_agent[agent_id] += tot
 
         return rewards_by_agent
+
+    def _load_rewards_backup(self):
+        """Загружаем сохраненные награды при перезапуске"""
+        try:
+            if os.path.exists(self.rewards_backup_file):
+                with open(self.rewards_backup_file, 'r') as f:
+                    backup_data = json.load(f)
+                
+                self.batched_signals = backup_data.get('batched_signals', 0.0)
+                self.time_since_submit = backup_data.get('time_since_submit', time.time())
+                
+                backup_round = backup_data.get('round', 'unknown')
+                backup_age_hours = (time.time() - backup_data.get('timestamp', time.time())) / 3600
+                
+                get_logger().info(f"💾 Restored rewards backup from round {backup_round}")
+                get_logger().info(f"💰 Restored batched_signals: {self.batched_signals:.2f}")
+                get_logger().info(f"🕐 Backup age: {backup_age_hours:.1f} hours ago")
+                
+                # Проверяем, не нужно ли срочно сабмитить
+                time_since_last_submit = (time.time() - self.time_since_submit) / 3600
+                if time_since_last_submit > self.submit_period and self.batched_signals > 0:
+                    get_logger().warning(f"🚨 URGENT: Found unsaved rewards {self.batched_signals:.2f} from {time_since_last_submit:.1f}h ago!")
+                    get_logger().info("🔄 Will attempt emergency submit on next opportunity")
+                    
+            else:
+                get_logger().info("📝 No rewards backup found - starting fresh")
+        except Exception as e:
+            get_logger().error(f"❌ Failed to load rewards backup: {e}")
+            get_logger().info("📝 Starting with fresh rewards")
+
+    def _save_rewards_backup(self):
+        """Сохраняем текущие награды для восстановления при перезапуске"""
+        try:
+            backup_data = {
+                'batched_signals': self.batched_signals,
+                'time_since_submit': self.time_since_submit,
+                'round': self.state.round,
+                'timestamp': time.time(),
+                'peer_id': self.peer_id
+            }
+            with open(self.rewards_backup_file, 'w') as f:
+                json.dump(backup_data, f, indent=2)
+            get_logger().debug(f"💾 Saved rewards backup: {self.batched_signals:.2f}")
+        except Exception as e:
+            get_logger().error(f"❌ Failed to save rewards backup: {e}")
 
     def _get_my_rewards(self, signal_by_agent):
         if len(signal_by_agent) == 0:
@@ -210,28 +241,29 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
 
     def _try_submit_to_chain(self, signal_by_agent):
         elapsed_time_hours = (time.time() - self.time_since_submit) / 3600
-        self.debug_logger.info(f"📊 [DEBUG] signal_by_agent received: {dict(signal_by_agent) if signal_by_agent else 'Empty'}")
-        self.debug_logger.info(f"📈 [DEBUG] signal_by_agent length: {len(signal_by_agent)}")
-        if len(signal_by_agent) > 0:
-            self.debug_logger.info(f"🔍 [DEBUG] signal_by_agent details: {[(agent_id, f'{signal:.2f}') for agent_id, signal in signal_by_agent.items()]}")
-        get_logger().info(f"🕐 Checking submit timing: elapsed_time_hours={elapsed_time_hours:.2f}, submit_period={self.submit_period}")
         if elapsed_time_hours > self.submit_period:
-            get_logger().info(f"⏰ Time to submit! Starting submission process for round {self.state.round}")
             try:
                 get_logger().info(f"💰 Submitting reward: round={self.state.round}, reward={int(self.batched_signals)}, peer_id={self.peer_id}")
                 self.coordinator.submit_reward(
                     self.state.round, 0, int(self.batched_signals), self.peer_id
                 )
                 get_logger().info(f"✅ Successfully submitted reward {int(self.batched_signals)} for round {self.state.round}")
+                
+                # Сбрасываем batched_signals сразу после успешной отправки reward (как в оригинале)
                 self.batched_signals = 0.0
+                
+                # Очищаем backup после успешной отправки reward
+                try:
+                    if os.path.exists(self.rewards_backup_file):
+                        os.remove(self.rewards_backup_file)
+                        get_logger().info("🗑️  Cleared rewards backup after successful reward submit")
+                except Exception as e:
+                    get_logger().error(f"❌ Failed to clear rewards backup: {e}")
                 
                 if len(signal_by_agent) > 0:
                     max_agent, max_signal = max(signal_by_agent.items(), key=lambda x: x[1])
-                    get_logger().info(f"🏆 Found max agent from signals: {max_agent} with signal {max_signal:.2f}")
-                    get_logger().info(f"📊 All signal_by_agent: {dict(signal_by_agent)}")
                 else: # if we have no signal_by_agents, just submit ourselves.
                     max_agent = self.peer_id
-                    get_logger().info(f"🤷 No signal_by_agent data, submitting ourselves as winner: {max_agent}")
 
                 get_logger().info(f"🏅 Submitting winners: round={self.state.round}, winners=[{max_agent}], submitter_peer_id={self.peer_id}")
                 self.coordinator.submit_winners(self.state.round, [max_agent], self.peer_id)
@@ -255,6 +287,10 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         my_current_reward = self._get_my_rewards(signal_by_agent)
         self.batched_signals += my_current_reward
         get_logger().info(f"🎯 Current rewards for peer: {self.batched_signals:.2f} (added: {my_current_reward:.2f})")
+        
+        # Сохраняем backup после каждого обновления наград
+        self._save_rewards_backup()
+        
         self._try_submit_to_chain(signal_by_agent)
 
     def _hook_after_round_advanced(self):
