@@ -242,7 +242,7 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
             }
             with open(self.rewards_backup_file, 'w') as f:
                 json.dump(backup_data, f, indent=2)
-            get_logger().debug(f"💾 Saved rewards backup: {self.batched_signals:.2f}")
+            get_logger().info(f"💾 Saved rewards backup: {self.batched_signals:.2f}")
         except Exception as e:
             get_logger().error(f"❌ Failed to save rewards backup: {e}")
 
