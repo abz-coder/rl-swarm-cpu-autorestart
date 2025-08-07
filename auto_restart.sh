@@ -31,7 +31,7 @@ export PATH="$FAKEBIN:$PATH"
 
 SCRIPT="$RL_DIR/run_rl_swarm.sh"
 TMP_LOG="/tmp/rlswarm_stdout.log"
-MAX_IDLE=1500  # 10 минут
+MAX_IDLE=900  # 15 минут
 RESTART_COUNT=0
 
 KEYWORDS=(
