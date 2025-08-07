@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 
 from genrl.blockchain import SwarmCoordinator
 from genrl.communication import Communication
@@ -77,6 +78,24 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         file_handler.setFormatter(formatter)
         _LOG = get_logger()
         _LOG.addHandler(file_handler)
+
+        # Debug Logger Setup - для подробных signal_by_agent логов
+        self.debug_logger = logging.getLogger(f"debug_{self.animal_name}")
+        self.debug_logger.setLevel(logging.INFO)
+        debug_formatter = logging.Formatter(format_msg)
+        
+        # Очищаем лог-файл с сигналами перед началом работы
+        debug_log_path = os.path.join(log_dir, f"debug_signals_{self.animal_name}.log")
+        if os.path.exists(debug_log_path):
+            with open(debug_log_path, 'w') as f:
+                f.write("")  # Очищаем файл
+            get_logger().info(f"🧹 Cleared debug signals log file: {debug_log_path}")
+        
+        debug_file_handler = logging.FileHandler(debug_log_path)
+        debug_file_handler.setFormatter(debug_formatter)
+        self.debug_logger.addHandler(debug_file_handler)
+        # Не передаем логи в root logger
+        self.debug_logger.propagate = False
 
         # Сохраняем coordinator для работы с блокчейном
         self.coordinator = coordinator
@@ -241,7 +260,15 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
 
     def _try_submit_to_chain(self, signal_by_agent):
         elapsed_time_hours = (time.time() - self.time_since_submit) / 3600
+        
+        self.debug_logger.info(f"📊 [DEBUG] signal_by_agent received: {dict(signal_by_agent) if signal_by_agent else 'Empty'}")
+        self.debug_logger.info(f"📈 [DEBUG] signal_by_agent length: {len(signal_by_agent)}")
+        if len(signal_by_agent) > 0:
+            self.debug_logger.info(f"🔍 [DEBUG] signal_by_agent details: {[(agent_id, f'{signal:.2f}') for agent_id, signal in signal_by_agent.items()]}")
+        get_logger().info(f"🕐 Checking submit timing: elapsed_time_hours={elapsed_time_hours:.2f}, submit_period={self.submit_period}")
+        
         if elapsed_time_hours > self.submit_period:
+            get_logger().info(f"⏰ Time to submit! Starting submission process for round {self.state.round}")
             try:
                 get_logger().info(f"💰 Submitting reward: round={self.state.round}, reward={int(self.batched_signals)}, peer_id={self.peer_id}")
                 self.coordinator.submit_reward(
