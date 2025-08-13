@@ -15,6 +15,8 @@ export ORG_ID
 export HF_HUB_DOWNLOAD_TIMEOUT=120  # 2 minutes
 export SWARM_CONTRACT="0xFaD7C5e93f28257429569B854151A1B8DCD404c2"
 export HUGGINGFACE_ACCESS_TOKEN="None"
+export TUNNEL_LOCAL_URL=${TUNNEL_LOCAL_URL:-http://localhost:3000}
+
 
 # Path to an RSA private key. If this path does not exist, a new key pair will be created.
 # Remove this file if you want a new PeerID.
@@ -152,30 +154,57 @@ if [ "$CONNECT_TO_TESTNET" = true ]; then
 
     # Проверяем, есть ли данные в modal-login/temp-data
     if [ ! -f "$ROOT/modal-login/temp-data/userData.json" ]; then
-        echo_green ">> userData.json not found. Starting tunnel..."
-
-        # Tunnel the localhost:3000 using localtunnel
-        if ! command -v lt > /dev/null 2>&1; then
-            echo "Installing localtunnel..."
-            npm install -g localtunnel
+        echo_green ">> userData.json not found. Starting anonymous Cloudflare tunnel..."
+    
+        # Установка cloudflared (Ubuntu/WSL → apt, macOS → brew, иначе пытаемся snap)
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            if grep -qi "ubuntu" /etc/os-release 2>/dev/null || uname -r | grep -qi "microsoft"; then
+                echo "Installing cloudflared via apt..."
+                sudo mkdir -p --mode=0755 /usr/share/keyrings
+                curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+                echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(. /etc/os-release && echo $VERSION_CODENAME) main" \
+                  | sudo tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+                sudo apt update && sudo apt install -y cloudflared
+            elif command -v brew >/dev/null 2>&1; then
+                echo "Installing cloudflared via Homebrew..."
+                brew install cloudflared
+            elif command -v snap >/dev/null 2>&1; then
+                echo "Installing cloudflared via snap..."
+                sudo snap install cloudflared
+            else
+                echo_red "cloudflared not found and auto-install is unsupported on this OS. Install it manually and re-run."
+                exit 1
+            fi
         fi
-
-        echo_green ">> Starting localtunnel for port 3000..."
-        lt --port 3000 &
-        LT_PID=$!
-
-        # Выводим IP сервера
-        SERVER_IP=$(hostname -I | awk '{print $1}')
-        echo "Server IP: $SERVER_IP"
-
-        # Wait a bit to ensure tunnel is up
-        sleep 3
-
-        echo "Your tunnel is running! Use the link printed above to visit the website."
-        echo "If prompted for a password, use your VPS IP."
+    
+        # Запуск анонимного туннеля. Логи — в файл, чтобы вытащить публичный URL
+        echo_green ">> Starting Cloudflare Quick Tunnel for $TUNNEL_LOCAL_URL ..."
+        cloudflared tunnel --no-autoupdate --url "$TUNNEL_LOCAL_URL" > "$ROOT/logs/cloudflared.log" 2>&1 &
+        CLOUDFLARED_PID=$!
+    
+        # Ждём появления URL в логах (обычно строка с https://*.trycloudflare.com)
+        echo_green ">> Waiting for Cloudflare tunnel URL..."
+        PUBLIC_URL=""
+        for i in {1..30}; do
+            if grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$ROOT/logs/cloudflared.log" >/dev/null 2>&1; then
+                PUBLIC_URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$ROOT/logs/cloudflared.log" | head -n1)
+                break
+            fi
+            sleep 1
+        done
+    
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        echo "Server IP: ${SERVER_IP:-unknown}"
+    
+        if [ -n "$PUBLIC_URL" ]; then
+            echo_green ">> Your public tunnel is: $PUBLIC_URL"
+            echo "Open this URL to access the login page."
+        else
+            echo_red ">> Failed to obtain public URL. See $ROOT/logs/cloudflared.log"
+        fi
     else
-        echo_green ">> User data found. Skipping localtunnel."
-        
+        echo_green ">> User data found. Skipping tunnel."
+    
         # Try to open the URL in the default browser if not in Docker
         if [ -z "$DOCKER" ]; then
             if open http://localhost:3000 2> /dev/null; then
@@ -187,6 +216,7 @@ if [ "$CONNECT_TO_TESTNET" = true ]; then
             echo_green ">> Please open http://localhost:3000 in your host browser."
         fi
     fi
+
 
     cd ..
 
@@ -200,10 +230,11 @@ if [ "$CONNECT_TO_TESTNET" = true ]; then
     echo "Your ORG_ID is set to: $ORG_ID"
 
     # Закрываем туннель, если он был запущен
-    if [ -n "${LT_PID:-}" ]; then
-        kill "$LT_PID" || true
-        echo_green ">> Localtunnel has been closed."
+    if [ -n "${CLOUDFLARED_PID:-}" ]; then
+        kill "$CLOUDFLARED_PID" || true
+        echo_green ">> Cloudflare tunnel has been closed."
     fi
+
 
     # Wait until the API key is activated by the client
     echo "Waiting for API key to become activated..."
